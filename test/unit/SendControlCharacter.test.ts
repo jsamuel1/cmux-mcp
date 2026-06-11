@@ -1,86 +1,83 @@
 // @ts-nocheck
 import { jest, describe, expect, test, beforeEach } from '@jest/globals';
 import SendControlCharacter from '../../src/SendControlCharacter.js';
+import { CMUX_BIN } from '../../src/cmux-path.js';
 
 // Create a mock subclass that overrides the executeCommand method
 class MockSendControlCharacter extends SendControlCharacter {
   mockExecuteCommand = jest.fn();
 
-  protected async executeCommand(command: string): Promise<void> {
-    this.mockExecuteCommand(command);
+  protected async executeCommand(file: string, args: string[]): Promise<void> {
+    this.mockExecuteCommand(file, args);
     return Promise.resolve();
   }
 }
 
 describe('SendControlCharacter', () => {
   let sendControlCharacter: MockSendControlCharacter;
-  
+
   beforeEach(() => {
-    // Initialize our test subject
     sendControlCharacter = new MockSendControlCharacter();
     sendControlCharacter.mockExecuteCommand.mockClear();
   });
-  
+
   test('should send standard control character (Ctrl+C)', async () => {
-    // Act
     await sendControlCharacter.send('C');
-    
-    // Assert - C is ASCII 67, Ctrl+C is ASCII 3 (67-64)
+
     expect(sendControlCharacter.mockExecuteCommand).toHaveBeenCalledWith(
-      expect.stringContaining('ASCII character 3')
+      CMUX_BIN, ['send-key', 'ctrl+c']
     );
   });
-  
+
   test('should handle lowercase letters correctly', async () => {
-    // Act
     await sendControlCharacter.send('c');
-    
-    // Assert
+
     expect(sendControlCharacter.mockExecuteCommand).toHaveBeenCalledWith(
-      expect.stringContaining('ASCII character 3')
+      CMUX_BIN, ['send-key', 'ctrl+c']
     );
   });
-  
-  test('should handle telnet escape character (Ctrl+])', async () => {
-    // Act
+
+  test('should handle telnet escape character (Ctrl+]) as a raw GS byte', async () => {
     await sendControlCharacter.send(']');
-    
-    // Assert - Group Separator (GS) is ASCII 29
+
+    // Group Separator (GS) is ASCII 29 / 0x1d, sent as a literal byte
     expect(sendControlCharacter.mockExecuteCommand).toHaveBeenCalledWith(
-      expect.stringContaining('ASCII character 29')
+      CMUX_BIN, ['send', '--', '\x1d']
     );
   });
-  
+
   test('should handle escape key', async () => {
-    // Act
     await sendControlCharacter.send('ESC');
-    
-    // Assert - Escape is ASCII 27
     expect(sendControlCharacter.mockExecuteCommand).toHaveBeenCalledWith(
-      expect.stringContaining('ASCII character 27')
+      CMUX_BIN, ['send-key', 'escape']
     );
-    
-    // Test with alternative format
+
     await sendControlCharacter.send('escape');
     expect(sendControlCharacter.mockExecuteCommand).toHaveBeenCalledWith(
-      expect.stringContaining('ASCII character 27')
+      CMUX_BIN, ['send-key', 'escape']
     );
   });
-  
+
+  test('should target a specific surface when provided', async () => {
+    const surfaceSender = new MockSendControlCharacter('surface:2');
+    await surfaceSender.send('C');
+
+    expect(surfaceSender.mockExecuteCommand).toHaveBeenCalledWith(
+      CMUX_BIN, ['send-key', '--surface', 'surface:2', 'ctrl+c']
+    );
+  });
+
   test('should throw an error for invalid control characters', async () => {
-    // Act & Assert
     await expect(sendControlCharacter.send('123')).rejects.toThrow(
       'Invalid control character letter'
     );
   });
-  
+
   test('should throw an error when execution fails', async () => {
-    // Arrange - Make the mock throw an error
     sendControlCharacter.mockExecuteCommand.mockImplementation(() => {
       throw new Error('Command execution failed');
     });
-    
-    // Act & Assert
+
     await expect(sendControlCharacter.send('C')).rejects.toThrow(
       'Failed to send control character: Command execution failed'
     );

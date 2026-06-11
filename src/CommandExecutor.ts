@@ -1,4 +1,4 @@
-import { exec } from 'node:child_process';
+import { exec, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { openSync, closeSync } from 'node:fs';
 import ProcessTracker from './ProcessTracker.js';
@@ -6,7 +6,10 @@ import TtyOutputReader from './TtyOutputReader.js';
 import { CMUX_BIN } from './cmux-path.js';
 
 const execPromise = promisify(exec);
+const execFilePromise = promisify(execFile);
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+type ExecFileFn = (file: string, args: string[]) => Promise<{ stdout: string; stderr: string }>;
 
 // TTY path cache — path rarely changes during a session
 let cachedTtyPath: string | null = null;
@@ -14,19 +17,22 @@ let ttyPathCacheTime = 0;
 const TTY_CACHE_TTL_MS = 60_000; // 1 minute
 
 class CommandExecutor {
-  private _execPromise: typeof execPromise;
+  private _execFile: ExecFileFn;
   private _surface?: string;
 
-  constructor(execPromiseOverride?: typeof execPromise, surface?: string) {
-    this._execPromise = execPromiseOverride || execPromise;
+  constructor(execFileOverride?: ExecFileFn, surface?: string) {
+    this._execFile = execFileOverride || execFilePromise;
     this._surface = surface;
   }
 
   async executeCommand(command: string): Promise<string> {
     try {
       const textToSend = command + '\n';
-      const surfaceArg = this._surface ? ` --surface ${this._surface}` : '';
-      await this._execPromise(`${CMUX_BIN} send${surfaceArg} -- ${this.shellEscape(textToSend)}`);
+      const args = ['send'];
+      if (this._surface) args.push('--surface', this._surface);
+      args.push('--', textToSend);
+      // execFile: the text is passed as a single argv entry, never through a shell
+      await this._execFile(CMUX_BIN, args);
 
       const ttyPath = await this.retrieveTtyPath();
       await this.waitForCommandCompletion(ttyPath);
@@ -78,10 +84,6 @@ class CommandExecutor {
     }
   }
 
-  private shellEscape(str: string): string {
-    return "'" + str.replace(/'/g, "'\\''") + "'";
-  }
-
   private async retrieveTtyPath(): Promise<string> {
     // Return cached path if still fresh
     if (cachedTtyPath && (Date.now() - ttyPathCacheTime) < TTY_CACHE_TTL_MS) {
@@ -89,12 +91,13 @@ class CommandExecutor {
     }
 
     try {
-      const { stdout } = await this._execPromise(
+      // Fixed pipeline, no user input — safe to run through a shell
+      const { stdout } = await execPromise(
         `lsof -c cmux 2>/dev/null | grep /dev/ttys | awk '{print $9}' | sort -u | head -1 || lsof -p $(pgrep -f 'cmux.app/Contents/MacOS/cmux' | head -1) 2>/dev/null | grep /dev/ttys | awk '{print $9}' | sort -u | head -1`
       );
       const tty = stdout.trim();
       if (!tty) {
-        const { stdout: psTty } = await this._execPromise(
+        const { stdout: psTty } = await execPromise(
           `ps -eo tty,lstart,comm | grep -E '(bash|zsh|sh|fish)$' | grep -v grep | sort -k2 | tail -1 | awk '{print "/dev/" $1}'`
         );
         const fallbackTty = psTty.trim();

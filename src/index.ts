@@ -3,25 +3,69 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { exec } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import CommandExecutor from "./CommandExecutor.js";
 import TtyOutputReader from "./TtyOutputReader.js";
 import SendControlCharacter from "./SendControlCharacter.js";
 import { CMUX_BIN } from "./cmux-path.js";
 
-const execPromise = promisify(exec);
+const execFileAsync = promisify(execFile);
 
-async function runCmux(cmd: string): Promise<string> {
-  const { stdout } = await execPromise(`${CMUX_BIN} ${cmd}`);
+// All cmux invocations go through execFile (no shell), so tool arguments can
+// never be interpreted as shell syntax.
+async function runCmux(args: string[]): Promise<string> {
+  const { stdout } = await execFileAsync(CMUX_BIN, args);
   return stdout.trimEnd();
 }
 
-function shellEscape(str: string): string {
-  return "'" + str.replace(/'/g, "'\\''") + "'";
+type ToolArgs = Record<string, unknown>;
+
+// ─── Argument validation ───
+// Refs (surface:1, workspace IDs, etc.) and other structured values are
+// validated so they can't smuggle in extra CLI flags (argument injection).
+
+const REF_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_:.@/-]*$/;
+
+function ref(value: unknown, label: string): string {
+  const s = String(value);
+  if (!REF_PATTERN.test(s)) {
+    throw new Error(`Invalid ${label} ref: ${JSON.stringify(s)}`);
+  }
+  return s;
 }
 
-type ToolArgs = Record<string, unknown>;
+function intArg(value: unknown, label: string): string {
+  const n = Number(value);
+  if (!Number.isInteger(n)) {
+    throw new Error(`Invalid ${label}: expected an integer, got ${JSON.stringify(value)}`);
+  }
+  return String(n);
+}
+
+function numArg(value: unknown, label: string): string {
+  const n = Number(value);
+  if (!Number.isFinite(n)) {
+    throw new Error(`Invalid ${label}: expected a number, got ${JSON.stringify(value)}`);
+  }
+  return String(n);
+}
+
+function oneOf(value: unknown, allowed: readonly string[], label: string): string {
+  const s = String(value);
+  if (!allowed.includes(s)) {
+    throw new Error(`Invalid ${label}: ${JSON.stringify(s)} (expected one of ${allowed.join(', ')})`);
+  }
+  return s;
+}
+
+// Optional flag helpers: return [] when the arg is absent.
+const optRef = (v: unknown, flag: string, label: string): string[] =>
+  v === undefined || v === null || v === '' ? [] : [flag, ref(v, label)];
+const optInt = (v: unknown, flag: string, label: string): string[] =>
+  v === undefined || v === null ? [] : [flag, intArg(v, label)];
+const optText = (v: unknown, flag: string): string[] =>
+  v === undefined || v === null || v === '' ? [] : [flag, String(v)];
 
 const server = new Server(
   { name: "cmux-mcp", version: "1.3.1" },
@@ -311,14 +355,16 @@ const tools = [
 server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
 
 // ─── Tool Handlers ───
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const args: ToolArgs = request.params.arguments || {};
-  const name = request.params.name;
 
+function textResult(text: string) {
+  return { content: [{ type: "text" as const, text }] };
+}
+
+async function handleToolCall(name: string, args: ToolArgs) {
   switch (name) {
     // === Terminal I/O ===
     case "write_to_terminal": {
-      const surface = args.surface ? String(args.surface) : undefined;
+      const surface = args.surface ? ref(args.surface, 'surface') : undefined;
       const executor = new CommandExecutor(undefined, surface);
       const command = String(args.command);
       const beforeBuffer = await TtyOutputReader.retrieveBuffer(surface);
@@ -327,364 +373,279 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const afterBuffer = await TtyOutputReader.retrieveBuffer(surface);
       const afterLines = afterBuffer.split("\n").length;
       const outputLines = afterLines - beforeLines;
-      return { content: [{ type: "text" as const, text: `${outputLines} lines were output after sending the command to the terminal. Read the last ${outputLines} lines of terminal contents to orient yourself. Never assume that the command was executed or that it was successful.` }] };
+      return textResult(`${outputLines} lines were output after sending the command to the terminal. Read the last ${outputLines} lines of terminal contents to orient yourself. Never assume that the command was executed or that it was successful.`);
     }
     case "read_terminal_output": {
       const linesOfOutput = Number(args.linesOfOutput) || 25;
-      const surface = args.surface ? String(args.surface) : undefined;
+      const surface = args.surface ? ref(args.surface, 'surface') : undefined;
       const output = await TtyOutputReader.call(linesOfOutput, surface);
-      return { content: [{ type: "text" as const, text: output }] };
+      return textResult(output);
     }
     case "send_control_character": {
-      const surface = args.surface ? String(args.surface) : undefined;
+      const surface = args.surface ? ref(args.surface, 'surface') : undefined;
       const ctrl = new SendControlCharacter(surface);
       const letter = String(args.letter);
       await ctrl.send(letter);
-      return { content: [{ type: "text" as const, text: `Sent control character: Control-${letter.toUpperCase()}` }] };
+      return textResult(`Sent control character: Control-${letter.toUpperCase()}`);
     }
 
     // === Surface ===
-    case "list_surfaces": {
-      let cmd = 'list-pane-surfaces';
-      if (args.workspace) cmd += ` --workspace ${args.workspace}`;
-      if (args.pane) cmd += ` --pane ${args.pane}`;
-      return { content: [{ type: "text" as const, text: await runCmux(cmd) }] };
-    }
-    case "new_surface": {
-      let cmd = 'new-surface --type terminal';
-      if (args.workspace) cmd += ` --workspace ${args.workspace}`;
-      if (args.pane) cmd += ` --pane ${args.pane}`;
-      return { content: [{ type: "text" as const, text: `New surface created. ${await runCmux(cmd)}` }] };
-    }
-    case "close_surface": {
-      let cmd = `close-surface --surface ${args.surface}`;
-      if (args.workspace) cmd += ` --workspace ${args.workspace}`;
-      return { content: [{ type: "text" as const, text: `Surface ${args.surface} closed. ${await runCmux(cmd)}` }] };
-    }
-    case "focus_surface": {
-      let cmd = `move-surface --surface ${args.surface} --focus true`;
-      if (args.workspace) cmd += ` --workspace ${args.workspace}`;
-      return { content: [{ type: "text" as const, text: `Focused surface ${args.surface}. ${await runCmux(cmd)}` }] };
-    }
+    case "list_surfaces":
+      return textResult(await runCmux(['list-pane-surfaces', ...optRef(args.workspace, '--workspace', 'workspace'), ...optRef(args.pane, '--pane', 'pane')]));
+    case "new_surface":
+      return textResult(`New surface created. ${await runCmux(['new-surface', '--type', 'terminal', ...optRef(args.workspace, '--workspace', 'workspace'), ...optRef(args.pane, '--pane', 'pane')])}`);
+    case "close_surface":
+      return textResult(`Surface ${args.surface} closed. ${await runCmux(['close-surface', '--surface', ref(args.surface, 'surface'), ...optRef(args.workspace, '--workspace', 'workspace')])}`);
+    case "focus_surface":
+      return textResult(`Focused surface ${args.surface}. ${await runCmux(['move-surface', '--surface', ref(args.surface, 'surface'), '--focus', 'true', ...optRef(args.workspace, '--workspace', 'workspace')])}`);
     case "move_surface": {
-      let cmd = `move-surface --surface ${args.surface}`;
-      if (args.pane) cmd += ` --pane ${args.pane}`;
-      if (args.workspace) cmd += ` --workspace ${args.workspace}`;
-      if (args.window) cmd += ` --window ${args.window}`;
-      if (args.before) cmd += ` --before ${args.before}`;
-      if (args.after) cmd += ` --after ${args.after}`;
-      if (args.index !== undefined) cmd += ` --index ${args.index}`;
-      if (args.focus !== undefined) cmd += ` --focus ${args.focus}`;
-      return { content: [{ type: "text" as const, text: await runCmux(cmd) }] };
+      const cmd = ['move-surface', '--surface', ref(args.surface, 'surface'),
+        ...optRef(args.pane, '--pane', 'pane'),
+        ...optRef(args.workspace, '--workspace', 'workspace'),
+        ...optRef(args.window, '--window', 'window'),
+        ...optRef(args.before, '--before', 'before'),
+        ...optRef(args.after, '--after', 'after'),
+        ...optInt(args.index, '--index', 'index')];
+      if (args.focus !== undefined) cmd.push('--focus', String(Boolean(args.focus)));
+      return textResult(await runCmux(cmd));
     }
-    case "reorder_surface": {
-      let cmd = `reorder-surface --surface ${args.surface}`;
-      if (args.index !== undefined) cmd += ` --index ${args.index}`;
-      if (args.before) cmd += ` --before ${args.before}`;
-      if (args.after) cmd += ` --after ${args.after}`;
-      return { content: [{ type: "text" as const, text: await runCmux(cmd) }] };
-    }
-    case "rename_tab": {
-      let cmd = 'rename-tab';
-      if (args.workspace) cmd += ` --workspace ${args.workspace}`;
-      if (args.surface) cmd += ` --surface ${args.surface}`;
-      cmd += ` ${shellEscape(String(args.title))}`;
-      return { content: [{ type: "text" as const, text: await runCmux(cmd) }] };
-    }
-    case "new_split": {
-      let cmd = `new-split ${args.direction}`;
-      if (args.workspace) cmd += ` --workspace ${args.workspace}`;
-      if (args.surface) cmd += ` --surface ${args.surface}`;
-      if (args.panel) cmd += ` --panel ${args.panel}`;
-      return { content: [{ type: "text" as const, text: await runCmux(cmd) }] };
-    }
+    case "reorder_surface":
+      return textResult(await runCmux(['reorder-surface', '--surface', ref(args.surface, 'surface'),
+        ...optInt(args.index, '--index', 'index'),
+        ...optRef(args.before, '--before', 'before'),
+        ...optRef(args.after, '--after', 'after')]));
+    case "rename_tab":
+      return textResult(await runCmux(['rename-tab',
+        ...optRef(args.workspace, '--workspace', 'workspace'),
+        ...optRef(args.surface, '--surface', 'surface'),
+        String(args.title)]));
+    case "new_split":
+      return textResult(await runCmux(['new-split', oneOf(args.direction, ['left', 'right', 'up', 'down'], 'direction'),
+        ...optRef(args.workspace, '--workspace', 'workspace'),
+        ...optRef(args.surface, '--surface', 'surface'),
+        ...optRef(args.panel, '--panel', 'panel')]));
     case "drag_surface_to_split":
-      return { content: [{ type: "text" as const, text: await runCmux(`drag-surface-to-split --surface ${args.surface} ${args.direction}`) }] };
+      return textResult(await runCmux(['drag-surface-to-split', '--surface', ref(args.surface, 'surface'), oneOf(args.direction, ['left', 'right', 'up', 'down'], 'direction')]));
     case "refresh_surfaces":
-      return { content: [{ type: "text" as const, text: await runCmux('refresh-surfaces') }] };
-    case "surface_health": {
-      let cmd = 'surface-health';
-      if (args.workspace) cmd += ` --workspace ${args.workspace}`;
-      return { content: [{ type: "text" as const, text: await runCmux(cmd) }] };
-    }
+      return textResult(await runCmux(['refresh-surfaces']));
+    case "surface_health":
+      return textResult(await runCmux(['surface-health', ...optRef(args.workspace, '--workspace', 'workspace')]));
 
     // === Pane ===
-    case "list_panes": {
-      let cmd = 'list-panes';
-      if (args.workspace) cmd += ` --workspace ${args.workspace}`;
-      return { content: [{ type: "text" as const, text: await runCmux(cmd) }] };
-    }
-    case "new_pane": {
-      let cmd = `new-pane --type terminal --direction ${args.direction || 'right'}`;
-      if (args.workspace) cmd += ` --workspace ${args.workspace}`;
-      return { content: [{ type: "text" as const, text: `New pane created. ${await runCmux(cmd)}` }] };
-    }
-    case "focus_pane": {
-      let cmd = `focus-pane --pane ${args.pane}`;
-      if (args.workspace) cmd += ` --workspace ${args.workspace}`;
-      return { content: [{ type: "text" as const, text: await runCmux(cmd) }] };
-    }
-    case "resize_pane": {
-      let cmd = `resize-pane --pane ${args.pane} -${args.direction}`;
-      if (args.amount) cmd += ` --amount ${args.amount}`;
-      if (args.workspace) cmd += ` --workspace ${args.workspace}`;
-      return { content: [{ type: "text" as const, text: await runCmux(cmd) }] };
-    }
-    case "swap_pane": {
-      let cmd = `swap-pane --pane ${args.pane} --target-pane ${args.target_pane}`;
-      if (args.workspace) cmd += ` --workspace ${args.workspace}`;
-      return { content: [{ type: "text" as const, text: await runCmux(cmd) }] };
-    }
-    case "break_pane": {
-      let cmd = 'break-pane';
-      if (args.pane) cmd += ` --pane ${args.pane}`;
-      if (args.workspace) cmd += ` --workspace ${args.workspace}`;
-      if (args.surface) cmd += ` --surface ${args.surface}`;
-      return { content: [{ type: "text" as const, text: await runCmux(cmd) }] };
-    }
-    case "join_pane": {
-      let cmd = `join-pane --target-pane ${args.target_pane}`;
-      if (args.pane) cmd += ` --pane ${args.pane}`;
-      if (args.workspace) cmd += ` --workspace ${args.workspace}`;
-      if (args.surface) cmd += ` --surface ${args.surface}`;
-      return { content: [{ type: "text" as const, text: await runCmux(cmd) }] };
-    }
-    case "last_pane": {
-      let cmd = 'last-pane';
-      if (args.workspace) cmd += ` --workspace ${args.workspace}`;
-      return { content: [{ type: "text" as const, text: await runCmux(cmd) }] };
-    }
-    case "list_panels": {
-      let cmd = 'list-panels';
-      if (args.workspace) cmd += ` --workspace ${args.workspace}`;
-      return { content: [{ type: "text" as const, text: await runCmux(cmd) }] };
-    }
-    case "focus_panel": {
-      let cmd = `focus-panel --panel ${args.panel}`;
-      if (args.workspace) cmd += ` --workspace ${args.workspace}`;
-      return { content: [{ type: "text" as const, text: await runCmux(cmd) }] };
-    }
+    case "list_panes":
+      return textResult(await runCmux(['list-panes', ...optRef(args.workspace, '--workspace', 'workspace')]));
+    case "new_pane":
+      return textResult(`New pane created. ${await runCmux(['new-pane', '--type', 'terminal', '--direction', oneOf(args.direction ?? 'right', ['left', 'right', 'up', 'down'], 'direction'), ...optRef(args.workspace, '--workspace', 'workspace')])}`);
+    case "focus_pane":
+      return textResult(await runCmux(['focus-pane', '--pane', ref(args.pane, 'pane'), ...optRef(args.workspace, '--workspace', 'workspace')]));
+    case "resize_pane":
+      return textResult(await runCmux(['resize-pane', '--pane', ref(args.pane, 'pane'),
+        `-${oneOf(args.direction, ['L', 'R', 'U', 'D'], 'direction')}`,
+        ...optInt(args.amount, '--amount', 'amount'),
+        ...optRef(args.workspace, '--workspace', 'workspace')]));
+    case "swap_pane":
+      return textResult(await runCmux(['swap-pane', '--pane', ref(args.pane, 'pane'), '--target-pane', ref(args.target_pane, 'target_pane'), ...optRef(args.workspace, '--workspace', 'workspace')]));
+    case "break_pane":
+      return textResult(await runCmux(['break-pane',
+        ...optRef(args.pane, '--pane', 'pane'),
+        ...optRef(args.workspace, '--workspace', 'workspace'),
+        ...optRef(args.surface, '--surface', 'surface')]));
+    case "join_pane":
+      return textResult(await runCmux(['join-pane', '--target-pane', ref(args.target_pane, 'target_pane'),
+        ...optRef(args.pane, '--pane', 'pane'),
+        ...optRef(args.workspace, '--workspace', 'workspace'),
+        ...optRef(args.surface, '--surface', 'surface')]));
+    case "last_pane":
+      return textResult(await runCmux(['last-pane', ...optRef(args.workspace, '--workspace', 'workspace')]));
+    case "list_panels":
+      return textResult(await runCmux(['list-panels', ...optRef(args.workspace, '--workspace', 'workspace')]));
+    case "focus_panel":
+      return textResult(await runCmux(['focus-panel', '--panel', ref(args.panel, 'panel'), ...optRef(args.workspace, '--workspace', 'workspace')]));
 
     // === Window ===
-    case "list_windows": return { content: [{ type: "text" as const, text: await runCmux('list-windows') }] };
-    case "new_window": return { content: [{ type: "text" as const, text: `New window created. ${await runCmux('new-window')}` }] };
-    case "close_window": return { content: [{ type: "text" as const, text: `Window closed. ${await runCmux(`close-window --window ${args.window}`)}` }] };
-    case "focus_window": return { content: [{ type: "text" as const, text: await runCmux(`focus-window --window ${args.window}`) }] };
-    case "current_window": return { content: [{ type: "text" as const, text: await runCmux('current-window') }] };
-    case "rename_window": {
-      let cmd = 'rename-window';
-      if (args.workspace) cmd += ` --workspace ${args.workspace}`;
-      cmd += ` ${shellEscape(String(args.title))}`;
-      return { content: [{ type: "text" as const, text: await runCmux(cmd) }] };
-    }
-    case "next_window": return { content: [{ type: "text" as const, text: await runCmux('next-window') }] };
-    case "previous_window": return { content: [{ type: "text" as const, text: await runCmux('previous-window') }] };
-    case "last_window": return { content: [{ type: "text" as const, text: await runCmux('last-window') }] };
+    case "list_windows": return textResult(await runCmux(['list-windows']));
+    case "new_window": return textResult(`New window created. ${await runCmux(['new-window'])}`);
+    case "close_window": return textResult(`Window closed. ${await runCmux(['close-window', '--window', ref(args.window, 'window')])}`);
+    case "focus_window": return textResult(await runCmux(['focus-window', '--window', ref(args.window, 'window')]));
+    case "current_window": return textResult(await runCmux(['current-window']));
+    case "rename_window":
+      return textResult(await runCmux(['rename-window', ...optRef(args.workspace, '--workspace', 'workspace'), String(args.title)]));
+    case "next_window": return textResult(await runCmux(['next-window']));
+    case "previous_window": return textResult(await runCmux(['previous-window']));
+    case "last_window": return textResult(await runCmux(['last-window']));
     case "move_workspace_to_window":
-      return { content: [{ type: "text" as const, text: await runCmux(`move-workspace-to-window --workspace ${args.workspace} --window ${args.window}`) }] };
+      return textResult(await runCmux(['move-workspace-to-window', '--workspace', ref(args.workspace, 'workspace'), '--window', ref(args.window, 'window')]));
 
     // === Workspace ===
-    case "list_workspaces": return { content: [{ type: "text" as const, text: await runCmux('list-workspaces') }] };
-    case "new_workspace": {
-      let cmd = 'new-workspace';
-      if (args.cwd) cmd += ` --cwd ${shellEscape(String(args.cwd))}`;
-      if (args.command) cmd += ` --command ${shellEscape(String(args.command))}`;
-      return { content: [{ type: "text" as const, text: `New workspace created. ${await runCmux(cmd)}` }] };
-    }
-    case "close_workspace": return { content: [{ type: "text" as const, text: await runCmux(`close-workspace --workspace ${args.workspace}`) }] };
-    case "select_workspace": return { content: [{ type: "text" as const, text: await runCmux(`select-workspace --workspace ${args.workspace}`) }] };
-    case "rename_workspace": {
-      let cmd = 'rename-workspace';
-      if (args.workspace) cmd += ` --workspace ${args.workspace}`;
-      cmd += ` ${shellEscape(String(args.title))}`;
-      return { content: [{ type: "text" as const, text: await runCmux(cmd) }] };
-    }
-    case "current_workspace": return { content: [{ type: "text" as const, text: await runCmux('current-workspace') }] };
-    case "reorder_workspace": {
-      let cmd = `reorder-workspace --workspace ${args.workspace}`;
-      if (args.index !== undefined) cmd += ` --index ${args.index}`;
-      if (args.before) cmd += ` --before ${args.before}`;
-      if (args.after) cmd += ` --after ${args.after}`;
-      return { content: [{ type: "text" as const, text: await runCmux(cmd) }] };
-    }
+    case "list_workspaces": return textResult(await runCmux(['list-workspaces']));
+    case "new_workspace":
+      return textResult(`New workspace created. ${await runCmux(['new-workspace', ...optText(args.cwd, '--cwd'), ...optText(args.command, '--command')])}`);
+    case "close_workspace": return textResult(await runCmux(['close-workspace', '--workspace', ref(args.workspace, 'workspace')]));
+    case "select_workspace": return textResult(await runCmux(['select-workspace', '--workspace', ref(args.workspace, 'workspace')]));
+    case "rename_workspace":
+      return textResult(await runCmux(['rename-workspace', ...optRef(args.workspace, '--workspace', 'workspace'), String(args.title)]));
+    case "current_workspace": return textResult(await runCmux(['current-workspace']));
+    case "reorder_workspace":
+      return textResult(await runCmux(['reorder-workspace', '--workspace', ref(args.workspace, 'workspace'),
+        ...optInt(args.index, '--index', 'index'),
+        ...optRef(args.before, '--before', 'before'),
+        ...optRef(args.after, '--after', 'after')]));
 
     // === Search ===
     case "find_window": {
-      let cmd = 'find-window';
-      if (args.content) cmd += ' --content';
-      if (args.select) cmd += ' --select';
-      cmd += ` ${shellEscape(String(args.query))}`;
-      return { content: [{ type: "text" as const, text: await runCmux(cmd) }] };
+      const cmd = ['find-window'];
+      if (args.content) cmd.push('--content');
+      if (args.select) cmd.push('--select');
+      cmd.push(String(args.query));
+      return textResult(await runCmux(cmd));
     }
 
     // === Structure ===
     case "tree": {
-      let cmd = 'tree';
-      if (args.all) cmd += ' --all';
-      if (args.workspace) cmd += ` --workspace ${args.workspace}`;
-      return { content: [{ type: "text" as const, text: await runCmux(cmd) }] };
+      const cmd = ['tree'];
+      if (args.all) cmd.push('--all');
+      cmd.push(...optRef(args.workspace, '--workspace', 'workspace'));
+      return textResult(await runCmux(cmd));
     }
-    case "identify": {
-      let cmd = 'identify';
-      if (args.workspace) cmd += ` --workspace ${args.workspace}`;
-      if (args.surface) cmd += ` --surface ${args.surface}`;
-      return { content: [{ type: "text" as const, text: await runCmux(cmd) }] };
-    }
+    case "identify":
+      return textResult(await runCmux(['identify', ...optRef(args.workspace, '--workspace', 'workspace'), ...optRef(args.surface, '--surface', 'surface')]));
 
     // === Notifications ===
-    case "notify": {
-      let cmd = `notify --title ${shellEscape(String(args.title))}`;
-      if (args.subtitle) cmd += ` --subtitle ${shellEscape(String(args.subtitle))}`;
-      if (args.body) cmd += ` --body ${shellEscape(String(args.body))}`;
-      if (args.workspace) cmd += ` --workspace ${args.workspace}`;
-      if (args.surface) cmd += ` --surface ${args.surface}`;
-      return { content: [{ type: "text" as const, text: await runCmux(cmd) }] };
-    }
-    case "list_notifications": return { content: [{ type: "text" as const, text: await runCmux('list-notifications') }] };
-    case "clear_notifications": return { content: [{ type: "text" as const, text: await runCmux('clear-notifications') }] };
+    case "notify":
+      return textResult(await runCmux(['notify', '--title', String(args.title),
+        ...optText(args.subtitle, '--subtitle'),
+        ...optText(args.body, '--body'),
+        ...optRef(args.workspace, '--workspace', 'workspace'),
+        ...optRef(args.surface, '--surface', 'surface')]));
+    case "list_notifications": return textResult(await runCmux(['list-notifications']));
+    case "clear_notifications": return textResult(await runCmux(['clear-notifications']));
 
     // === Sidebar ===
     case "set_status": {
-      let cmd = `set-status ${shellEscape(String(args.key))} ${shellEscape(String(args.value))}`;
-      if (args.icon) cmd += ` --icon ${shellEscape(String(args.icon))}`;
-      if (args.color) cmd += ` --color ${args.color}`;
-      if (args.workspace) cmd += ` --workspace ${args.workspace}`;
-      return { content: [{ type: "text" as const, text: await runCmux(cmd) }] };
+      const cmd = ['set-status', String(args.key), String(args.value), ...optText(args.icon, '--icon')];
+      if (args.color) {
+        const color = String(args.color);
+        if (!/^#?[0-9a-fA-F]{3,8}$/.test(color)) throw new Error(`Invalid color: ${JSON.stringify(color)}`);
+        cmd.push('--color', color);
+      }
+      cmd.push(...optRef(args.workspace, '--workspace', 'workspace'));
+      return textResult(await runCmux(cmd));
     }
-    case "clear_status": {
-      let cmd = `clear-status ${shellEscape(String(args.key))}`;
-      if (args.workspace) cmd += ` --workspace ${args.workspace}`;
-      return { content: [{ type: "text" as const, text: await runCmux(cmd) }] };
-    }
-    case "list_status": {
-      let cmd = 'list-status';
-      if (args.workspace) cmd += ` --workspace ${args.workspace}`;
-      return { content: [{ type: "text" as const, text: await runCmux(cmd) }] };
-    }
-    case "set_progress": {
-      let cmd = `set-progress ${args.value}`;
-      if (args.label) cmd += ` --label ${shellEscape(String(args.label))}`;
-      if (args.workspace) cmd += ` --workspace ${args.workspace}`;
-      return { content: [{ type: "text" as const, text: await runCmux(cmd) }] };
-    }
-    case "clear_progress": {
-      let cmd = 'clear-progress';
-      if (args.workspace) cmd += ` --workspace ${args.workspace}`;
-      return { content: [{ type: "text" as const, text: await runCmux(cmd) }] };
-    }
-    case "sidebar_state": {
-      let cmd = 'sidebar-state';
-      if (args.workspace) cmd += ` --workspace ${args.workspace}`;
-      return { content: [{ type: "text" as const, text: await runCmux(cmd) }] };
-    }
+    case "clear_status":
+      return textResult(await runCmux(['clear-status', String(args.key), ...optRef(args.workspace, '--workspace', 'workspace')]));
+    case "list_status":
+      return textResult(await runCmux(['list-status', ...optRef(args.workspace, '--workspace', 'workspace')]));
+    case "set_progress":
+      return textResult(await runCmux(['set-progress', numArg(args.value, 'value'),
+        ...optText(args.label, '--label'),
+        ...optRef(args.workspace, '--workspace', 'workspace')]));
+    case "clear_progress":
+      return textResult(await runCmux(['clear-progress', ...optRef(args.workspace, '--workspace', 'workspace')]));
+    case "sidebar_state":
+      return textResult(await runCmux(['sidebar-state', ...optRef(args.workspace, '--workspace', 'workspace')]));
 
     // === Log ===
     case "log": {
-      let cmd = 'log';
-      if (args.level) cmd += ` --level ${args.level}`;
-      if (args.source) cmd += ` --source ${shellEscape(String(args.source))}`;
-      if (args.workspace) cmd += ` --workspace ${args.workspace}`;
-      cmd += ` -- ${shellEscape(String(args.message))}`;
-      return { content: [{ type: "text" as const, text: await runCmux(cmd) }] };
+      const cmd = ['log'];
+      if (args.level) cmd.push('--level', oneOf(args.level, ['info', 'warn', 'error', 'debug'], 'level'));
+      cmd.push(...optText(args.source, '--source'));
+      cmd.push(...optRef(args.workspace, '--workspace', 'workspace'));
+      cmd.push('--', String(args.message));
+      return textResult(await runCmux(cmd));
     }
-    case "clear_log": {
-      let cmd = 'clear-log';
-      if (args.workspace) cmd += ` --workspace ${args.workspace}`;
-      return { content: [{ type: "text" as const, text: await runCmux(cmd) }] };
-    }
-    case "list_log": {
-      let cmd = 'list-log';
-      if (args.limit) cmd += ` --limit ${args.limit}`;
-      if (args.workspace) cmd += ` --workspace ${args.workspace}`;
-      return { content: [{ type: "text" as const, text: await runCmux(cmd) }] };
-    }
+    case "clear_log":
+      return textResult(await runCmux(['clear-log', ...optRef(args.workspace, '--workspace', 'workspace')]));
+    case "list_log":
+      return textResult(await runCmux(['list-log', ...optInt(args.limit, '--limit', 'limit'), ...optRef(args.workspace, '--workspace', 'workspace')]));
 
     // === Buffer ===
-    case "set_buffer": {
-      let cmd = 'set-buffer';
-      if (args.name) cmd += ` --name ${shellEscape(String(args.name))}`;
-      cmd += ` ${shellEscape(String(args.text))}`;
-      return { content: [{ type: "text" as const, text: await runCmux(cmd) }] };
-    }
-    case "list_buffers": return { content: [{ type: "text" as const, text: await runCmux('list-buffers') }] };
-    case "paste_buffer": {
-      let cmd = 'paste-buffer';
-      if (args.name) cmd += ` --name ${shellEscape(String(args.name))}`;
-      if (args.workspace) cmd += ` --workspace ${args.workspace}`;
-      if (args.surface) cmd += ` --surface ${args.surface}`;
-      return { content: [{ type: "text" as const, text: await runCmux(cmd) }] };
-    }
+    case "set_buffer":
+      return textResult(await runCmux(['set-buffer', ...optText(args.name, '--name'), String(args.text)]));
+    case "list_buffers": return textResult(await runCmux(['list-buffers']));
+    case "paste_buffer":
+      return textResult(await runCmux(['paste-buffer',
+        ...optText(args.name, '--name'),
+        ...optRef(args.workspace, '--workspace', 'workspace'),
+        ...optRef(args.surface, '--surface', 'surface')]));
 
     // === Terminal Control ===
-    case "clear_history": {
-      let cmd = 'clear-history';
-      if (args.workspace) cmd += ` --workspace ${args.workspace}`;
-      if (args.surface) cmd += ` --surface ${args.surface}`;
-      return { content: [{ type: "text" as const, text: await runCmux(cmd) }] };
-    }
-    case "respawn_pane": {
-      let cmd = 'respawn-pane';
-      if (args.workspace) cmd += ` --workspace ${args.workspace}`;
-      if (args.surface) cmd += ` --surface ${args.surface}`;
-      if (args.command) cmd += ` --command ${shellEscape(String(args.command))}`;
-      return { content: [{ type: "text" as const, text: await runCmux(cmd) }] };
-    }
+    case "clear_history":
+      return textResult(await runCmux(['clear-history', ...optRef(args.workspace, '--workspace', 'workspace'), ...optRef(args.surface, '--surface', 'surface')]));
+    case "respawn_pane":
+      return textResult(await runCmux(['respawn-pane',
+        ...optRef(args.workspace, '--workspace', 'workspace'),
+        ...optRef(args.surface, '--surface', 'surface'),
+        ...optText(args.command, '--command')]));
     case "display_message": {
-      let cmd = 'display-message';
-      if (args.print) cmd += ' -p';
-      cmd += ` ${shellEscape(String(args.text))}`;
-      return { content: [{ type: "text" as const, text: await runCmux(cmd) }] };
+      const cmd = ['display-message'];
+      if (args.print) cmd.push('-p');
+      cmd.push(String(args.text));
+      return textResult(await runCmux(cmd));
     }
-    case "trigger_flash": {
-      let cmd = 'trigger-flash';
-      if (args.workspace) cmd += ` --workspace ${args.workspace}`;
-      if (args.surface) cmd += ` --surface ${args.surface}`;
-      return { content: [{ type: "text" as const, text: await runCmux(cmd) }] };
-    }
-    case "pipe_pane": {
-      let cmd = `pipe-pane --command ${shellEscape(String(args.command))}`;
-      if (args.workspace) cmd += ` --workspace ${args.workspace}`;
-      if (args.surface) cmd += ` --surface ${args.surface}`;
-      return { content: [{ type: "text" as const, text: await runCmux(cmd) }] };
-    }
+    case "trigger_flash":
+      return textResult(await runCmux(['trigger-flash', ...optRef(args.workspace, '--workspace', 'workspace'), ...optRef(args.surface, '--surface', 'surface')]));
+    case "pipe_pane":
+      return textResult(await runCmux(['pipe-pane', '--command', String(args.command),
+        ...optRef(args.workspace, '--workspace', 'workspace'),
+        ...optRef(args.surface, '--surface', 'surface')]));
     case "capture_pane": {
-      let cmd = 'capture-pane';
-      if (args.workspace) cmd += ` --workspace ${args.workspace}`;
-      if (args.surface) cmd += ` --surface ${args.surface}`;
-      if (args.scrollback) cmd += ' --scrollback';
-      if (args.lines) cmd += ` --lines ${args.lines}`;
-      return { content: [{ type: "text" as const, text: await runCmux(cmd) }] };
+      const cmd = ['capture-pane',
+        ...optRef(args.workspace, '--workspace', 'workspace'),
+        ...optRef(args.surface, '--surface', 'surface')];
+      if (args.scrollback) cmd.push('--scrollback');
+      cmd.push(...optInt(args.lines, '--lines', 'lines'));
+      return textResult(await runCmux(cmd));
     }
 
     // === Hooks & Misc ===
     case "set_hook": {
-      if (args.list) return { content: [{ type: "text" as const, text: await runCmux('set-hook --list') }] };
-      if (args.unset) return { content: [{ type: "text" as const, text: await runCmux(`set-hook --unset ${shellEscape(String(args.unset))}`) }] };
-      return { content: [{ type: "text" as const, text: await runCmux(`set-hook ${shellEscape(String(args.event))} ${shellEscape(String(args.command))}`) }] };
+      if (args.list) return textResult(await runCmux(['set-hook', '--list']));
+      if (args.unset) return textResult(await runCmux(['set-hook', '--unset', String(args.unset)]));
+      return textResult(await runCmux(['set-hook', String(args.event), String(args.command)]));
     }
     case "wait_for": {
-      let cmd = 'wait-for';
-      if (args.signal) cmd += ' -S';
-      cmd += ` ${shellEscape(String(args.name))}`;
-      if (args.timeout) cmd += ` --timeout ${args.timeout}`;
-      return { content: [{ type: "text" as const, text: await runCmux(cmd) }] };
+      const cmd = ['wait-for'];
+      if (args.signal) cmd.push('-S');
+      cmd.push(String(args.name));
+      cmd.push(...optInt(args.timeout, '--timeout', 'timeout'));
+      return textResult(await runCmux(cmd));
     }
-    case "set_app_focus": return { content: [{ type: "text" as const, text: await runCmux(`set-app-focus ${args.state}`) }] };
-    case "markdown_open": return { content: [{ type: "text" as const, text: await runCmux(`markdown open ${shellEscape(String(args.path))}`) }] };
-    case "version": return { content: [{ type: "text" as const, text: await runCmux('version') }] };
-    case "ping": return { content: [{ type: "text" as const, text: await runCmux('ping') }] };
+    case "set_app_focus":
+      return textResult(await runCmux(['set-app-focus', oneOf(args.state, ['active', 'inactive', 'clear'], 'state')]));
+    case "markdown_open":
+      return textResult(await runCmux(['markdown', 'open', String(args.path)]));
+    case "version": return textResult(await runCmux(['version']));
+    case "ping": return textResult(await runCmux(['ping']));
 
     // === Browser ===
     case "browser": {
-      let cmd = 'browser';
-      if (args.surface) cmd += ` --surface ${args.surface}`;
-      cmd += ` ${args.subcommand}`;
-      if (args.args) cmd += ` ${args.args}`;
-      return { content: [{ type: "text" as const, text: await runCmux(cmd) }] };
+      const subcommand = String(args.subcommand);
+      if (!/^[a-z][a-z-]*$/i.test(subcommand)) {
+        throw new Error(`Invalid browser subcommand: ${JSON.stringify(subcommand)}`);
+      }
+      const cmd = ['browser', ...optRef(args.surface, '--surface', 'surface'), subcommand];
+      if (Array.isArray(args.args)) {
+        cmd.push(...args.args.map(String));
+      } else if (args.args !== undefined && args.args !== null && args.args !== '') {
+        cmd.push(...String(args.args).split(/\s+/).filter(Boolean));
+      }
+      return textResult(await runCmux(cmd));
     }
 
     default:
       throw new Error(`Unknown tool: ${name}`);
+  }
+}
+
+server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  const args: ToolArgs = request.params.arguments || {};
+  try {
+    return await handleToolCall(request.params.name, args);
+  } catch (error: unknown) {
+    return {
+      content: [{ type: "text" as const, text: `Error: ${(error as Error).message}` }],
+      isError: true,
+    };
   }
 });
 

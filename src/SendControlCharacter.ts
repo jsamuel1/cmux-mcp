@@ -1,9 +1,9 @@
-import { exec } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
 import { CMUX_BIN } from './cmux-path.js';
 
-const execPromise = promisify(exec);
+const execFilePromise = promisify(execFile);
 
 class SendControlCharacter {
   private _surface?: string;
@@ -12,17 +12,18 @@ class SendControlCharacter {
     this._surface = surface;
   }
 
-  protected async executeCommand(command: string): Promise<void> {
-    await execPromise(command);
+  protected async executeCommand(file: string, args: string[]): Promise<void> {
+    await execFilePromise(file, args);
   }
 
   async send(letter: string): Promise<void> {
     let keyName: string;
-    const surfaceArg = this._surface ? ` --surface ${this._surface}` : '';
+    const surfaceArgs = this._surface ? ['--surface', this._surface] : [];
 
     // Handle special cases
     if (letter.toUpperCase() === ']') {
-      await this.executeCommand(`${CMUX_BIN} send${surfaceArg} -- $'\\x1d'`);
+      // Telnet escape (GS, ASCII 29) has no named key — send the raw byte
+      await this.executeCommand(CMUX_BIN, ['send', ...surfaceArgs, '--', '\x1d']);
       return;
     }
     else if (letter.toUpperCase() === 'ESCAPE' || letter.toUpperCase() === 'ESC') {
@@ -37,7 +38,7 @@ class SendControlCharacter {
     }
 
     try {
-      await this.executeCommand(`${CMUX_BIN} send-key${surfaceArg} ${keyName}`);
+      await this.executeCommand(CMUX_BIN, ['send-key', ...surfaceArgs, keyName]);
     } catch (error: unknown) {
       throw new Error(`Failed to send control character: ${(error as Error).message}`);
     }

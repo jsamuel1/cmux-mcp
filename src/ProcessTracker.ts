@@ -1,9 +1,11 @@
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { existsSync } from 'fs';
 import { basename } from 'path';
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
+
+const TTY_NAME_PATTERN = /^[A-Za-z0-9]+$/;
 
 interface ProcessInfo {
   pid: string;
@@ -59,6 +61,9 @@ class ProcessTracker {
       }
 
       const ttyName = basename(ttyPath);
+      if (!TTY_NAME_PATTERN.test(ttyName)) {
+        throw new Error(`Invalid TTY name: ${ttyName}`);
+      }
       const processes = await this.getProcessesForTTY(ttyName);
       
       if (!processes.length) {
@@ -107,8 +112,8 @@ class ProcessTracker {
   private async getProcessesForTTY(ttyName: string): Promise<ProcessInfo[]> {
     try {
       // Include CPU%, memory, and accumulated CPU time in the output
-      const { stdout } = await execAsync(
-        `ps -t ${ttyName} -o pid,ppid,pgid,sess,state,%cpu,rss,time,command -w`
+      const { stdout } = await execFileAsync(
+        'ps', ['-t', ttyName, '-o', 'pid,ppid,pgid,sess,state,%cpu,rss,time,command', '-w']
       );
 
       const lines = stdout.trim().split('\n');
@@ -160,10 +165,9 @@ class ProcessTracker {
    */
   private async getForegroundProcessGroup(ttyName: string): Promise<string | null> {
     try {
-      const { stdout } = await execAsync(
-        `bash -c 'ps -o pgid= -t ${ttyName} | head -n1'`
-      );
-      return stdout.trim();
+      const { stdout } = await execFileAsync('ps', ['-o', 'pgid=', '-t', ttyName]);
+      const firstLine = stdout.split('\n')[0] ?? '';
+      return firstLine.trim() || null;
     } catch {
       return null;
     }
