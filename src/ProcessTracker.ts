@@ -394,37 +394,4 @@ class ProcessTracker {
   }
 }
 
-// Example usage
-async function main() {
-  const tracker = new ProcessTracker();
-  const ttyPath = '/dev/ttys001'; // Example TTY path
-  
-  const process = await tracker.getActiveProcess(ttyPath);
-  
-  if (process) {
-    console.log('Active process:');
-    console.log(`  Name: ${process.name}`);
-    console.log(`  Command: ${process.command}`);
-    console.log(`  Command Chain: ${process.commandChain}`);
-    if (process.environment) {
-      console.log(`  Environment: ${process.environment}`);
-    }
-    
-    console.log('\nResource Usage:');
-    console.log(`  Total CPU: ${process.metrics.totalCPUPercent.toFixed(1)}%`);
-    console.log(`  Total Memory: ${process.metrics.totalMemoryMB.toFixed(1)} MB`);
-    
-    if (process.metrics.processBreakdown.length > 0) {
-      console.log('\nProcess Breakdown:');
-      for (const proc of process.metrics.processBreakdown) {
-        console.log(`  ${proc.name} (${proc.pid}):`);
-        console.log(`    CPU: ${proc.cpuPercent.toFixed(1)}%`);
-        console.log(`    Memory: ${proc.memory} KB`);
-      }
-    }
-  } else {
-    console.log('No active process found');
-  }
-}
-
 export default ProcessTracker;
