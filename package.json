@@ -1,6 +1,6 @@
 {
   "name": "cmux-mcp",
-  "version": "1.3.1",
+  "version": "1.4.0",
   "description": "A Model Context Protocol server that provides access to the currently active tab of cmux",
   "homepage": "https://github.com/daegweon/cmux-mcp#readme",
   "repository": {

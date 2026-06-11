@@ -68,16 +68,50 @@ const optText = (v: unknown, flag: string): string[] =>
   v === undefined || v === null || v === '' ? [] : [flag, String(v)];
 
 const server = new Server(
-  { name: "cmux-mcp", version: "1.3.1" },
+  { name: "cmux-mcp", version: "1.4.0" },
   { capabilities: { tools: {} } }
 );
+
+// ─── Annotation helpers ───
+// Every tool is tagged with standard MCP tool annotations so clients can
+// distinguish read-only, write, and dangerous/destructive tools:
+//   readOnlyHint    — no side effects; safe to auto-approve
+//   destructiveHint — dangerous: executes commands, kills processes, or
+//                     irreversibly deletes data; warrants confirmation
+//   idempotentHint  — repeating the same call has no additional effect
+//   openWorldHint   — interacts with the outside world (e.g. the web)
+
+interface Hints {
+  read?: boolean;
+  destructive?: boolean;
+  idempotent?: boolean;
+  openWorld?: boolean;
+}
+
+function annotate(title: string, hints: Hints = {}) {
+  return {
+    title,
+    annotations: {
+      title,
+      readOnlyHint: hints.read ?? false,
+      destructiveHint: hints.destructive ?? false,
+      idempotentHint: hints.idempotent ?? false,
+      openWorldHint: hints.openWorld ?? false,
+    },
+  };
+}
+
+const readOnly = (title: string) => annotate(title, { read: true, idempotent: true });
+const write = (title: string, idempotent = true) => annotate(title, { idempotent });
+const dangerous = (title: string, idempotent = false) => annotate(title, { destructive: true, idempotent });
 
 // ─── Tool Definitions ───
 const tools = [
   // === Terminal I/O ===
   {
     name: "write_to_terminal",
-    description: "Writes text to the active cmux terminal - often used to run a command in the terminal",
+    ...dangerous("Write to Terminal"),
+    description: "Writes text to the active cmux terminal - often used to run a command in the terminal. Executes arbitrary commands in the user's shell.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -89,6 +123,7 @@ const tools = [
   },
   {
     name: "read_terminal_output",
+    ...readOnly("Read Terminal Output"),
     description: "Reads the output from the active cmux terminal",
     inputSchema: {
       type: "object" as const,
@@ -101,7 +136,8 @@ const tools = [
   },
   {
     name: "send_control_character",
-    description: "Sends a control character to the active cmux terminal (e.g., Control-C, or special sequences like ']' for telnet escape)",
+    ...dangerous("Send Control Character"),
+    description: "Sends a control character to the active cmux terminal (e.g., Control-C, or special sequences like ']' for telnet escape). Can interrupt or terminate running processes.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -115,56 +151,67 @@ const tools = [
   // === Surface (Tab) Management ===
   {
     name: "list_surfaces",
+    ...readOnly("List Surfaces"),
     description: "Lists all surfaces (tabs) in the current workspace with their IDs and titles",
     inputSchema: { type: "object" as const, properties: { workspace: { type: "string", description: "Optional workspace ref." }, pane: { type: "string", description: "Optional pane ref." } } }
   },
   {
     name: "new_surface",
+    ...write("New Surface", false),
     description: "Creates a new terminal tab in the current pane",
     inputSchema: { type: "object" as const, properties: { workspace: { type: "string", description: "Optional workspace ref." }, pane: { type: "string", description: "Optional pane ref." } } }
   },
   {
     name: "close_surface",
-    description: "Closes a specific surface (tab)",
+    ...dangerous("Close Surface", true),
+    description: "Closes a specific surface (tab), terminating any process running in it",
     inputSchema: { type: "object" as const, properties: { surface: { type: "string", description: "Surface ref to close. Required." }, workspace: { type: "string", description: "Optional workspace ref." } }, required: ["surface"] }
   },
   {
     name: "focus_surface",
+    ...write("Focus Surface"),
     description: "Focuses (activates) a specific surface (tab)",
     inputSchema: { type: "object" as const, properties: { surface: { type: "string", description: "Surface ref to focus. Required." }, workspace: { type: "string", description: "Optional workspace ref." } }, required: ["surface"] }
   },
   {
     name: "move_surface",
+    ...write("Move Surface"),
     description: "Moves a surface to a different pane, window, or position",
     inputSchema: { type: "object" as const, properties: { surface: { type: "string", description: "Surface ref to move. Required." }, pane: { type: "string", description: "Target pane ref." }, workspace: { type: "string", description: "Target workspace ref." }, window: { type: "string", description: "Target window ref." }, before: { type: "string", description: "Place before this surface ref." }, after: { type: "string", description: "Place after this surface ref." }, index: { type: "integer", description: "Target index position." }, focus: { type: "boolean", description: "Focus after move. Default true." } }, required: ["surface"] }
   },
   {
     name: "reorder_surface",
+    ...write("Reorder Surface"),
     description: "Reorders a surface within its pane",
     inputSchema: { type: "object" as const, properties: { surface: { type: "string", description: "Surface ref. Required." }, index: { type: "integer", description: "Target index." }, before: { type: "string", description: "Place before this ref." }, after: { type: "string", description: "Place after this ref." } }, required: ["surface"] }
   },
   {
     name: "rename_tab",
+    ...write("Rename Tab"),
     description: "Renames a tab (surface)",
     inputSchema: { type: "object" as const, properties: { title: { type: "string", description: "New title. Required." }, surface: { type: "string", description: "Optional surface ref." }, workspace: { type: "string", description: "Optional workspace ref." } }, required: ["title"] }
   },
   {
     name: "new_split",
+    ...write("New Split", false),
     description: "Splits the current surface into a new pane",
     inputSchema: { type: "object" as const, properties: { direction: { type: "string", enum: ["left", "right", "up", "down"], description: "Split direction. Required." }, workspace: { type: "string", description: "Optional workspace ref." }, surface: { type: "string", description: "Optional surface ref." }, panel: { type: "string", description: "Optional panel ref." } }, required: ["direction"] }
   },
   {
     name: "drag_surface_to_split",
+    ...write("Drag Surface to Split", false),
     description: "Drags a surface to create a split in a direction",
     inputSchema: { type: "object" as const, properties: { surface: { type: "string", description: "Surface ref. Required." }, direction: { type: "string", enum: ["left", "right", "up", "down"], description: "Direction. Required." } }, required: ["surface", "direction"] }
   },
   {
     name: "refresh_surfaces",
+    ...write("Refresh Surfaces"),
     description: "Refreshes all surfaces",
     inputSchema: { type: "object" as const, properties: {} }
   },
   {
     name: "surface_health",
+    ...readOnly("Surface Health"),
     description: "Checks health of surfaces in a workspace",
     inputSchema: { type: "object" as const, properties: { workspace: { type: "string", description: "Optional workspace ref." } } }
   },
@@ -172,92 +219,107 @@ const tools = [
   // === Pane Management ===
   {
     name: "list_panes",
+    ...readOnly("List Panes"),
     description: "Lists all panes in the current workspace",
     inputSchema: { type: "object" as const, properties: { workspace: { type: "string", description: "Optional workspace ref." } } }
   },
   {
     name: "new_pane",
+    ...write("New Pane", false),
     description: "Creates a new pane (split) in the workspace",
     inputSchema: { type: "object" as const, properties: { direction: { type: "string", enum: ["left", "right", "up", "down"], description: "Split direction. Defaults to right." }, workspace: { type: "string", description: "Optional workspace ref." } } }
   },
   {
     name: "focus_pane",
+    ...write("Focus Pane"),
     description: "Focuses a specific pane",
     inputSchema: { type: "object" as const, properties: { pane: { type: "string", description: "Pane ref. Required." }, workspace: { type: "string", description: "Optional workspace ref." } }, required: ["pane"] }
   },
   {
     name: "resize_pane",
+    ...write("Resize Pane", false),
     description: "Resizes a pane in a given direction",
     inputSchema: { type: "object" as const, properties: { pane: { type: "string", description: "Pane ref. Required." }, direction: { type: "string", enum: ["L", "R", "U", "D"], description: "Resize direction (L=left, R=right, U=up, D=down). Required." }, amount: { type: "integer", description: "Amount to resize. Default 1." }, workspace: { type: "string", description: "Optional workspace ref." } }, required: ["pane", "direction"] }
   },
   {
     name: "swap_pane",
+    ...write("Swap Panes", false),
     description: "Swaps two panes",
     inputSchema: { type: "object" as const, properties: { pane: { type: "string", description: "Source pane ref. Required." }, target_pane: { type: "string", description: "Target pane ref. Required." }, workspace: { type: "string", description: "Optional workspace ref." } }, required: ["pane", "target_pane"] }
   },
   {
     name: "break_pane",
+    ...write("Break Pane", false),
     description: "Breaks a pane out into a new workspace",
     inputSchema: { type: "object" as const, properties: { pane: { type: "string", description: "Optional pane ref." }, workspace: { type: "string", description: "Optional workspace ref." }, surface: { type: "string", description: "Optional surface ref." } } }
   },
   {
     name: "join_pane",
+    ...write("Join Pane", false),
     description: "Joins a pane into another pane",
     inputSchema: { type: "object" as const, properties: { target_pane: { type: "string", description: "Target pane to join into. Required." }, pane: { type: "string", description: "Optional source pane ref." }, workspace: { type: "string", description: "Optional workspace ref." }, surface: { type: "string", description: "Optional surface ref." } }, required: ["target_pane"] }
   },
   {
     name: "last_pane",
+    ...write("Last Pane", false),
     description: "Switches to the last active pane",
     inputSchema: { type: "object" as const, properties: { workspace: { type: "string", description: "Optional workspace ref." } } }
   },
   {
     name: "list_panels",
+    ...readOnly("List Panels"),
     description: "Lists all panels in a workspace",
     inputSchema: { type: "object" as const, properties: { workspace: { type: "string", description: "Optional workspace ref." } } }
   },
   {
     name: "focus_panel",
+    ...write("Focus Panel"),
     description: "Focuses a specific panel",
     inputSchema: { type: "object" as const, properties: { panel: { type: "string", description: "Panel ref. Required." }, workspace: { type: "string", description: "Optional workspace ref." } }, required: ["panel"] }
   },
 
   // === Window Management ===
-  { name: "list_windows", description: "Lists all cmux windows", inputSchema: { type: "object" as const, properties: {} } },
-  { name: "new_window", description: "Creates a new cmux window", inputSchema: { type: "object" as const, properties: {} } },
-  { name: "close_window", description: "Closes a specific cmux window", inputSchema: { type: "object" as const, properties: { window: { type: "string", description: "Window ID. Required." } }, required: ["window"] } },
-  { name: "focus_window", description: "Focuses a specific cmux window", inputSchema: { type: "object" as const, properties: { window: { type: "string", description: "Window ID. Required." } }, required: ["window"] } },
-  { name: "current_window", description: "Shows the current window info", inputSchema: { type: "object" as const, properties: {} } },
+  { name: "list_windows", ...readOnly("List Windows"), description: "Lists all cmux windows", inputSchema: { type: "object" as const, properties: {} } },
+  { name: "new_window", ...write("New Window", false), description: "Creates a new cmux window", inputSchema: { type: "object" as const, properties: {} } },
+  { name: "close_window", ...dangerous("Close Window", true), description: "Closes a specific cmux window, terminating any processes running in it", inputSchema: { type: "object" as const, properties: { window: { type: "string", description: "Window ID. Required." } }, required: ["window"] } },
+  { name: "focus_window", ...write("Focus Window"), description: "Focuses a specific cmux window", inputSchema: { type: "object" as const, properties: { window: { type: "string", description: "Window ID. Required." } }, required: ["window"] } },
+  { name: "current_window", ...readOnly("Current Window"), description: "Shows the current window info", inputSchema: { type: "object" as const, properties: {} } },
   {
     name: "rename_window",
+    ...write("Rename Window"),
     description: "Renames the current window",
     inputSchema: { type: "object" as const, properties: { title: { type: "string", description: "New title. Required." }, workspace: { type: "string", description: "Optional workspace ref." } }, required: ["title"] }
   },
-  { name: "next_window", description: "Switches to the next window", inputSchema: { type: "object" as const, properties: {} } },
-  { name: "previous_window", description: "Switches to the previous window", inputSchema: { type: "object" as const, properties: {} } },
-  { name: "last_window", description: "Switches to the last active window", inputSchema: { type: "object" as const, properties: {} } },
+  { name: "next_window", ...write("Next Window", false), description: "Switches to the next window", inputSchema: { type: "object" as const, properties: {} } },
+  { name: "previous_window", ...write("Previous Window", false), description: "Switches to the previous window", inputSchema: { type: "object" as const, properties: {} } },
+  { name: "last_window", ...write("Last Window", false), description: "Switches to the last active window", inputSchema: { type: "object" as const, properties: {} } },
   {
     name: "move_workspace_to_window",
+    ...write("Move Workspace to Window"),
     description: "Moves a workspace to a different window",
     inputSchema: { type: "object" as const, properties: { workspace: { type: "string", description: "Workspace ref. Required." }, window: { type: "string", description: "Target window ref. Required." } }, required: ["workspace", "window"] }
   },
 
   // === Workspace Management ===
-  { name: "list_workspaces", description: "Lists all workspaces in the current window", inputSchema: { type: "object" as const, properties: {} } },
+  { name: "list_workspaces", ...readOnly("List Workspaces"), description: "Lists all workspaces in the current window", inputSchema: { type: "object" as const, properties: {} } },
   {
     name: "new_workspace",
-    description: "Creates a new workspace (shown in the left sidebar)",
+    ...dangerous("New Workspace"),
+    description: "Creates a new workspace (shown in the left sidebar). If `command` is given, it is executed in the new workspace's shell.",
     inputSchema: { type: "object" as const, properties: { cwd: { type: "string", description: "Optional working directory." }, command: { type: "string", description: "Optional command to run." } } }
   },
-  { name: "close_workspace", description: "Closes a specific workspace", inputSchema: { type: "object" as const, properties: { workspace: { type: "string", description: "Workspace ref. Required." } }, required: ["workspace"] } },
-  { name: "select_workspace", description: "Selects (switches to) a specific workspace", inputSchema: { type: "object" as const, properties: { workspace: { type: "string", description: "Workspace ref. Required." } }, required: ["workspace"] } },
+  { name: "close_workspace", ...dangerous("Close Workspace", true), description: "Closes a specific workspace, terminating any processes running in it", inputSchema: { type: "object" as const, properties: { workspace: { type: "string", description: "Workspace ref. Required." } }, required: ["workspace"] } },
+  { name: "select_workspace", ...write("Select Workspace"), description: "Selects (switches to) a specific workspace", inputSchema: { type: "object" as const, properties: { workspace: { type: "string", description: "Workspace ref. Required." } }, required: ["workspace"] } },
   {
     name: "rename_workspace",
+    ...write("Rename Workspace"),
     description: "Renames a workspace",
     inputSchema: { type: "object" as const, properties: { title: { type: "string", description: "New title. Required." }, workspace: { type: "string", description: "Optional workspace ref." } }, required: ["title"] }
   },
-  { name: "current_workspace", description: "Shows the current workspace info", inputSchema: { type: "object" as const, properties: {} } },
+  { name: "current_workspace", ...readOnly("Current Workspace"), description: "Shows the current workspace info", inputSchema: { type: "object" as const, properties: {} } },
   {
     name: "reorder_workspace",
+    ...write("Reorder Workspace"),
     description: "Reorders a workspace within the sidebar",
     inputSchema: { type: "object" as const, properties: { workspace: { type: "string", description: "Workspace ref. Required." }, index: { type: "integer", description: "Target index." }, before: { type: "string", description: "Place before this ref." }, after: { type: "string", description: "Place after this ref." } }, required: ["workspace"] }
   },
@@ -265,18 +327,21 @@ const tools = [
   // === Search ===
   {
     name: "find_window",
-    description: "Searches for a window by content or title",
+    ...write("Find Window"),
+    description: "Searches for a window by content or title. With `select`, also switches to the found window.",
     inputSchema: { type: "object" as const, properties: { query: { type: "string", description: "Search query. Required." }, content: { type: "boolean", description: "Search in terminal content." }, select: { type: "boolean", description: "Select the found window." } }, required: ["query"] }
   },
 
   // === Structure ===
   {
     name: "tree",
+    ...readOnly("Show Tree"),
     description: "Shows the full tree structure of windows/workspaces/panes/surfaces",
     inputSchema: { type: "object" as const, properties: { all: { type: "boolean", description: "Show all windows." }, workspace: { type: "string", description: "Optional workspace ref." } } }
   },
   {
     name: "identify",
+    ...readOnly("Identify"),
     description: "Shows identity info for the current surface/workspace",
     inputSchema: { type: "object" as const, properties: { workspace: { type: "string", description: "Optional workspace ref." }, surface: { type: "string", description: "Optional surface ref." } } }
   },
@@ -284,67 +349,78 @@ const tools = [
   // === Notifications ===
   {
     name: "notify",
+    ...write("Send Notification", false),
     description: "Sends a notification",
     inputSchema: { type: "object" as const, properties: { title: { type: "string", description: "Notification title. Required." }, subtitle: { type: "string", description: "Optional subtitle." }, body: { type: "string", description: "Optional body text." }, workspace: { type: "string", description: "Optional workspace ref." }, surface: { type: "string", description: "Optional surface ref." } }, required: ["title"] }
   },
-  { name: "list_notifications", description: "Lists all notifications", inputSchema: { type: "object" as const, properties: {} } },
-  { name: "clear_notifications", description: "Clears all notifications", inputSchema: { type: "object" as const, properties: {} } },
+  { name: "list_notifications", ...readOnly("List Notifications"), description: "Lists all notifications", inputSchema: { type: "object" as const, properties: {} } },
+  { name: "clear_notifications", ...dangerous("Clear Notifications", true), description: "Clears all notifications (cannot be undone)", inputSchema: { type: "object" as const, properties: {} } },
 
   // === Sidebar Metadata ===
   {
     name: "set_status",
+    ...write("Set Status"),
     description: "Sets a status entry in the sidebar",
     inputSchema: { type: "object" as const, properties: { key: { type: "string", description: "Status key. Required." }, value: { type: "string", description: "Status value. Required." }, icon: { type: "string", description: "Optional icon name." }, color: { type: "string", description: "Optional hex color." }, workspace: { type: "string", description: "Optional workspace ref." } }, required: ["key", "value"] }
   },
-  { name: "clear_status", description: "Clears a status entry", inputSchema: { type: "object" as const, properties: { key: { type: "string", description: "Status key. Required." }, workspace: { type: "string", description: "Optional workspace ref." } }, required: ["key"] } },
-  { name: "list_status", description: "Lists all status entries", inputSchema: { type: "object" as const, properties: { workspace: { type: "string", description: "Optional workspace ref." } } } },
+  { name: "clear_status", ...write("Clear Status"), description: "Clears a status entry", inputSchema: { type: "object" as const, properties: { key: { type: "string", description: "Status key. Required." }, workspace: { type: "string", description: "Optional workspace ref." } }, required: ["key"] } },
+  { name: "list_status", ...readOnly("List Status"), description: "Lists all status entries", inputSchema: { type: "object" as const, properties: { workspace: { type: "string", description: "Optional workspace ref." } } } },
   {
     name: "set_progress",
+    ...write("Set Progress"),
     description: "Sets a progress bar in the sidebar (0.0 to 1.0)",
     inputSchema: { type: "object" as const, properties: { value: { type: "number", description: "Progress value 0.0-1.0. Required." }, label: { type: "string", description: "Optional label." }, workspace: { type: "string", description: "Optional workspace ref." } }, required: ["value"] }
   },
-  { name: "clear_progress", description: "Clears the progress bar", inputSchema: { type: "object" as const, properties: { workspace: { type: "string", description: "Optional workspace ref." } } } },
-  { name: "sidebar_state", description: "Shows the current sidebar state", inputSchema: { type: "object" as const, properties: { workspace: { type: "string", description: "Optional workspace ref." } } } },
+  { name: "clear_progress", ...write("Clear Progress"), description: "Clears the progress bar", inputSchema: { type: "object" as const, properties: { workspace: { type: "string", description: "Optional workspace ref." } } } },
+  { name: "sidebar_state", ...readOnly("Sidebar State"), description: "Shows the current sidebar state", inputSchema: { type: "object" as const, properties: { workspace: { type: "string", description: "Optional workspace ref." } } } },
 
   // === Log ===
   {
     name: "log",
+    ...write("Write Log Entry", false),
     description: "Writes a log entry to the workspace sidebar",
     inputSchema: { type: "object" as const, properties: { message: { type: "string", description: "Log message. Required." }, level: { type: "string", description: "Log level (info, warn, error)." }, source: { type: "string", description: "Optional source name." }, workspace: { type: "string", description: "Optional workspace ref." } }, required: ["message"] }
   },
-  { name: "clear_log", description: "Clears log entries", inputSchema: { type: "object" as const, properties: { workspace: { type: "string", description: "Optional workspace ref." } } } },
-  { name: "list_log", description: "Lists log entries", inputSchema: { type: "object" as const, properties: { limit: { type: "integer", description: "Max entries to show." }, workspace: { type: "string", description: "Optional workspace ref." } } } },
+  { name: "clear_log", ...dangerous("Clear Log", true), description: "Clears log entries (cannot be undone)", inputSchema: { type: "object" as const, properties: { workspace: { type: "string", description: "Optional workspace ref." } } } },
+  { name: "list_log", ...readOnly("List Log"), description: "Lists log entries", inputSchema: { type: "object" as const, properties: { limit: { type: "integer", description: "Max entries to show." }, workspace: { type: "string", description: "Optional workspace ref." } } } },
 
   // === Buffer ===
-  { name: "set_buffer", description: "Sets a named buffer with text content", inputSchema: { type: "object" as const, properties: { text: { type: "string", description: "Buffer content. Required." }, name: { type: "string", description: "Optional buffer name." } }, required: ["text"] } },
-  { name: "list_buffers", description: "Lists all buffers", inputSchema: { type: "object" as const, properties: {} } },
-  { name: "paste_buffer", description: "Pastes a buffer into the terminal", inputSchema: { type: "object" as const, properties: { name: { type: "string", description: "Optional buffer name." }, workspace: { type: "string", description: "Optional workspace ref." }, surface: { type: "string", description: "Optional surface ref." } } } },
+  { name: "set_buffer", ...write("Set Buffer"), description: "Sets a named buffer with text content (overwrites any existing content)", inputSchema: { type: "object" as const, properties: { text: { type: "string", description: "Buffer content. Required." }, name: { type: "string", description: "Optional buffer name." } }, required: ["text"] } },
+  { name: "list_buffers", ...readOnly("List Buffers"), description: "Lists all buffers", inputSchema: { type: "object" as const, properties: {} } },
+  { name: "paste_buffer", ...dangerous("Paste Buffer"), description: "Pastes a buffer into the terminal. Buffer content containing newlines may execute as commands.", inputSchema: { type: "object" as const, properties: { name: { type: "string", description: "Optional buffer name." }, workspace: { type: "string", description: "Optional workspace ref." }, surface: { type: "string", description: "Optional surface ref." } } } },
 
   // === Terminal Control ===
-  { name: "clear_history", description: "Clears terminal scrollback history", inputSchema: { type: "object" as const, properties: { workspace: { type: "string", description: "Optional workspace ref." }, surface: { type: "string", description: "Optional surface ref." } } } },
-  { name: "respawn_pane", description: "Respawns a pane (restarts the shell)", inputSchema: { type: "object" as const, properties: { workspace: { type: "string", description: "Optional workspace ref." }, surface: { type: "string", description: "Optional surface ref." }, command: { type: "string", description: "Optional command to run." } } } },
-  { name: "display_message", description: "Displays a message overlay", inputSchema: { type: "object" as const, properties: { text: { type: "string", description: "Message text. Required." }, print: { type: "boolean", description: "Print to stdout instead." } }, required: ["text"] } },
-  { name: "trigger_flash", description: "Triggers a visual flash on the terminal", inputSchema: { type: "object" as const, properties: { workspace: { type: "string", description: "Optional workspace ref." }, surface: { type: "string", description: "Optional surface ref." } } } },
-  { name: "pipe_pane", description: "Pipes pane output to a shell command", inputSchema: { type: "object" as const, properties: { command: { type: "string", description: "Shell command. Required." }, workspace: { type: "string", description: "Optional workspace ref." }, surface: { type: "string", description: "Optional surface ref." } }, required: ["command"] } },
-  { name: "capture_pane", description: "Captures pane content (tmux-compatible)", inputSchema: { type: "object" as const, properties: { workspace: { type: "string", description: "Optional workspace ref." }, surface: { type: "string", description: "Optional surface ref." }, scrollback: { type: "boolean", description: "Include scrollback." }, lines: { type: "integer", description: "Number of lines." } } } },
+  { name: "clear_history", ...dangerous("Clear History", true), description: "Clears terminal scrollback history (cannot be undone)", inputSchema: { type: "object" as const, properties: { workspace: { type: "string", description: "Optional workspace ref." }, surface: { type: "string", description: "Optional surface ref." } } } },
+  { name: "respawn_pane", ...dangerous("Respawn Pane"), description: "Respawns a pane (kills and restarts the shell). If `command` is given, it is executed in the new shell.", inputSchema: { type: "object" as const, properties: { workspace: { type: "string", description: "Optional workspace ref." }, surface: { type: "string", description: "Optional surface ref." }, command: { type: "string", description: "Optional command to run." } } } },
+  { name: "display_message", ...write("Display Message"), description: "Displays a message overlay", inputSchema: { type: "object" as const, properties: { text: { type: "string", description: "Message text. Required." }, print: { type: "boolean", description: "Print to stdout instead." } }, required: ["text"] } },
+  { name: "trigger_flash", ...write("Trigger Flash"), description: "Triggers a visual flash on the terminal", inputSchema: { type: "object" as const, properties: { workspace: { type: "string", description: "Optional workspace ref." }, surface: { type: "string", description: "Optional surface ref." } } } },
+  { name: "pipe_pane", ...dangerous("Pipe Pane"), description: "Pipes pane output to a shell command. Executes an arbitrary shell command.", inputSchema: { type: "object" as const, properties: { command: { type: "string", description: "Shell command. Required." }, workspace: { type: "string", description: "Optional workspace ref." }, surface: { type: "string", description: "Optional surface ref." } }, required: ["command"] } },
+  { name: "capture_pane", ...readOnly("Capture Pane"), description: "Captures pane content (tmux-compatible)", inputSchema: { type: "object" as const, properties: { workspace: { type: "string", description: "Optional workspace ref." }, surface: { type: "string", description: "Optional surface ref." }, scrollback: { type: "boolean", description: "Include scrollback." }, lines: { type: "integer", description: "Number of lines." } } } },
 
   // === Hooks & Misc ===
-  { name: "set_hook", description: "Sets or lists event hooks", inputSchema: { type: "object" as const, properties: { event: { type: "string", description: "Event name (for set/unset)." }, command: { type: "string", description: "Command to run on event." }, list: { type: "boolean", description: "List all hooks." }, unset: { type: "string", description: "Unset a hook by event name." } } } },
-  { name: "wait_for", description: "Waits for a named signal", inputSchema: { type: "object" as const, properties: { name: { type: "string", description: "Signal name. Required." }, signal: { type: "boolean", description: "Send the signal instead of waiting." }, timeout: { type: "integer", description: "Timeout in seconds." } }, required: ["name"] } },
-  { name: "set_app_focus", description: "Sets the app focus state", inputSchema: { type: "object" as const, properties: { state: { type: "string", enum: ["active", "inactive", "clear"], description: "Focus state. Required." } }, required: ["state"] } },
-  { name: "markdown_open", description: "Opens a markdown file in a formatted viewer panel with live reload", inputSchema: { type: "object" as const, properties: { path: { type: "string", description: "Path to markdown file. Required." } }, required: ["path"] } },
-  { name: "version", description: "Shows cmux version", inputSchema: { type: "object" as const, properties: {} } },
-  { name: "ping", description: "Pings the cmux socket", inputSchema: { type: "object" as const, properties: {} } },
+  { name: "set_hook", ...dangerous("Set Hook", true), description: "Sets or lists event hooks. Setting a hook registers an arbitrary command to execute on future events.", inputSchema: { type: "object" as const, properties: { event: { type: "string", description: "Event name (for set/unset)." }, command: { type: "string", description: "Command to run on event." }, list: { type: "boolean", description: "List all hooks." }, unset: { type: "string", description: "Unset a hook by event name." } } } },
+  { name: "wait_for", ...write("Wait For Signal", false), description: "Waits for a named signal", inputSchema: { type: "object" as const, properties: { name: { type: "string", description: "Signal name. Required." }, signal: { type: "boolean", description: "Send the signal instead of waiting." }, timeout: { type: "integer", description: "Timeout in seconds." } }, required: ["name"] } },
+  { name: "set_app_focus", ...write("Set App Focus"), description: "Sets the app focus state", inputSchema: { type: "object" as const, properties: { state: { type: "string", enum: ["active", "inactive", "clear"], description: "Focus state. Required." } }, required: ["state"] } },
+  { name: "markdown_open", ...write("Open Markdown"), description: "Opens a markdown file in a formatted viewer panel with live reload", inputSchema: { type: "object" as const, properties: { path: { type: "string", description: "Path to markdown file. Required." } }, required: ["path"] } },
+  { name: "version", ...readOnly("cmux Version"), description: "Shows cmux version", inputSchema: { type: "object" as const, properties: {} } },
+  { name: "ping", ...readOnly("Ping"), description: "Pings the cmux socket", inputSchema: { type: "object" as const, properties: {} } },
 
   // === Browser ===
   {
     name: "browser",
+    ...annotate("Browser Control", { destructive: true, openWorld: true }),
     description: "Controls the cmux built-in browser. Subcommands: open, open-split, navigate/goto, back, forward, reload, url, snapshot, eval, wait, click, dblclick, hover, focus, check, uncheck, scroll-into-view, type, fill, press, keydown, keyup, select, scroll, screenshot, get, is, find, frame, dialog, download, cookies, storage, tab, console, errors, highlight, state, addinitscript, addscript, addstyle, identify",
     inputSchema: {
       type: "object" as const,
       properties: {
         subcommand: { type: "string", description: "Browser subcommand (e.g. 'open', 'navigate', 'snapshot', 'click'). Required." },
-        args: { type: "string", description: "Arguments for the subcommand (e.g. URL, CSS selector, script). Pass as a single string." },
+        args: {
+          description: "Arguments for the subcommand (e.g. URL, CSS selector, script). Prefer an array of strings; a single string is split on whitespace.",
+          anyOf: [
+            { type: "array", items: { type: "string" } },
+            { type: "string" },
+          ],
+        },
         surface: { type: "string", description: "Optional surface ref for browser surface." },
       },
       required: ["subcommand"]

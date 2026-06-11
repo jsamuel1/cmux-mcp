@@ -95,6 +95,12 @@ cmux-mcp communicates over stdio. Point your MCP client to `node /path/to/cmux-m
 
 cmux-mcp exposes the full cmux CLI as MCP tools. All terminal I/O tools support an optional `surface` parameter for targeting specific tabs.
 
+Every tool carries standard [MCP tool annotations](https://modelcontextprotocol.io/specification/2025-06-18/server/tools#tool-annotations) (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`, `title`) so clients can distinguish three classes of tools and apply permission policies accordingly:
+
+- **Read-only** (`readOnlyHint: true`) — listing, reading output, inspecting state (e.g. `list_surfaces`, `read_terminal_output`, `tree`). Safe to auto-approve.
+- **Write** — UI changes that don't execute commands or destroy data (e.g. `focus_pane`, `rename_tab`, `set_status`).
+- **Dangerous** (`destructiveHint: true`) — anything that executes commands, terminates processes, or irreversibly deletes data (e.g. `write_to_terminal`, `send_control_character`, `close_workspace`, `pipe_pane`, `set_hook`, `browser`). Clients should require confirmation.
+
 ### Terminal I/O
 
 | Tool | Description |
@@ -330,6 +336,8 @@ npm run inspector      # Open MCP Inspector for interactive debugging
 ## Safety
 
 - No built-in command restrictions. Commands run with your shell's permissions.
+- All tools are tagged with MCP annotations (see [Tools](#tools)) — configure your MCP client to auto-approve only read-only tools and require confirmation for destructive ones.
+- Tool arguments are passed to the `cmux` CLI via `execFile` argv arrays (never through a shell), and ref/enum arguments are validated, so tool inputs cannot inject extra shell commands or CLI flags.
 - Monitor AI activity and interrupt if needed.
 - Start with focused tasks until you're familiar with the model's behavior.
 

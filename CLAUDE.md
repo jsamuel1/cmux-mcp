@@ -30,7 +30,7 @@ build/                     # Compiled JS output (gitignored)
 
 ## Key Files
 
-- `src/index.ts` — MCP server setup, 3 tool handlers: `write_to_terminal`, `read_terminal_output`, `send_control_character`
+- `src/index.ts` — MCP server setup, ~70 tool definitions (full cmux CLI coverage) with MCP tool annotations, arg validation helpers, and the tool-call dispatcher
 - `src/CommandExecutor.ts` — Core logic: `cmux send` → poll ProcessTracker until CPU idle → return buffer
 - `src/ProcessTracker.ts` — Pure Unix process inspection, no cmux dependency. Adapted from iterm-mcp (now uses `execFile`, validates the TTY name).
 - `jest.config.cjs` — CommonJS config required for Jest ESM support (`extensionsToTreatAsEsm`, `ts-jest` with `useESM`)
@@ -42,6 +42,7 @@ build/                     # Compiled JS output (gitignored)
 - TypeScript strict mode enabled
 - No AppleScript anywhere — all terminal interaction via `cmux` CLI binary
 - `execFile` with argv arrays everywhere user/model input is involved (never `exec` with string interpolation — that's a shell-injection vector). `exec` is only used for fixed, input-free pipelines (TTY discovery).
+- Every tool definition must include MCP annotations via the `readOnly`/`write`/`dangerous`/`annotate` helpers in index.ts
 - Ref-like tool args (surface/workspace/pane/window/panel/before/after) must go through `ref()`/`optRef()`; numbers through `intArg()`/`numArg()`; enums through `oneOf()`
 - Executors take an injectable `execFile` override via constructor for testing
 
