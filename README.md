@@ -2,6 +2,8 @@
 
 [한국어](./README.ko.md)
 
+> **Hardened fork.** This is a community fork of [`daegweon/cmux-mcp`](https://github.com/daegweon/cmux-mcp) that passes cmux CLI arguments via `execFile` (no shell, closing a command-injection hole), tags every tool with read-only/write/dangerous MCP annotations, and updates the MCP SDK. Changes are being offered back upstream. Published to npm under a scoped name to avoid colliding with the original package.
+
 **MCP server that gives AI agents full control of your [cmux](https://github.com/manaflow-ai/cmux) terminal.**
 
 Let Claude run commands, read output, manage tabs/panes/workspaces/windows, and send control characters in your cmux terminal -- all through the Model Context Protocol. Works in the background. No focus stealing.
@@ -26,7 +28,7 @@ Edit `~/.claude/settings.json`:
   "mcpServers": {
     "cmux-mcp": {
       "command": "npx",
-      "args": ["-y", "cmux-mcp"]
+      "args": ["-y", "@jsamuel1/cmux-mcp"]
     }
   }
 }

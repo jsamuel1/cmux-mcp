@@ -1,16 +1,26 @@
 {
   "name": "cmux-mcp",
-  "description": "MCP server for AI terminal control via cmux — run commands, read output, send control characters. Background operation, no focus stealing.",
-  "version": "1.2.7",
+  "description": "Hardened fork of cmux-mcp. MCP server for AI terminal control via cmux \u2014 run commands, read output, send control characters. execFile-safe arg passing, read-only/write/dangerous tool annotations. Background operation, no focus stealing.",
+  "version": "1.4.0",
   "author": {
-    "name": "daegweon",
-    "url": "https://github.com/daegweon"
+    "name": "jsamuel1",
+    "url": "https://github.com/jsamuel1"
   },
-  "repository": "https://github.com/daegweon/cmux-mcp",
+  "repository": "https://github.com/jsamuel1/cmux-mcp",
   "license": "MIT",
-  "keywords": ["mcp", "terminal", "cmux", "automation", "macos"],
+  "keywords": [
+    "mcp",
+    "terminal",
+    "cmux",
+    "automation",
+    "macos"
+  ],
   "requirements": {
-    "os": ["darwin"],
-    "tools": ["node"]
+    "os": [
+      "darwin"
+    ],
+    "tools": [
+      "node"
+    ]
   }
 }

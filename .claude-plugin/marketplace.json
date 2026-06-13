@@ -1,18 +1,18 @@
 {
-  "name": "cmux-tools",
-  "description": "Terminal control tools for AI coding agents",
+  "name": "cmux-tools-hardened",
+  "description": "Terminal control tools for AI coding agents (hardened fork of cmux-mcp)",
   "owner": {
-    "name": "daegweon",
-    "url": "https://github.com/daegweon"
+    "name": "jsamuel1",
+    "url": "https://github.com/jsamuel1"
   },
   "plugins": [
     {
       "name": "cmux-mcp",
       "source": {
         "source": "npm",
-        "package": "cmux-mcp"
+        "package": "@jsamuel1/cmux-mcp"
       },
-      "description": "MCP server for AI terminal control via cmux"
+      "description": "MCP server for AI terminal control via cmux (hardened fork)"
     }
   ]
 }
